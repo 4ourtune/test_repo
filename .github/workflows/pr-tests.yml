@@ -244,7 +244,7 @@ jobs:
     
     - name: Upload cppcheck results
       if: steps.changed_sources.outputs.has_changes == 'true'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: cppcheck-report
         path: cppcheck_report.xml
