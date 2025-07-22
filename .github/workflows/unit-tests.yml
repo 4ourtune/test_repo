@@ -159,7 +159,6 @@ jobs:
           echo "$CHANGED_FILES"
           echo "============================"
           
-          # 변경된 C/C++ 소스 파일들에 대해서만 cppcheck 실행
           SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(c|cpp)
     
     - name: Skip static analysis notification
