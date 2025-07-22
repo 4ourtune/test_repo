@@ -3,7 +3,7 @@ name: Unit Test
 on:
   pull_request:
     branches: [ master, develop ]
-
+    
 jobs:
   dynamic-test:
     runs-on: windows-latest
@@ -18,7 +18,7 @@ jobs:
     - name: Detect changed test files
       id: changed_tests
       run: |
-        # PR에서 변경된 테스트 파일들 찾기 (실제 베이스 브랜치와 비교)
+        # PR에서 변경된 테스트 파일들 찾기
         $changedTestFiles = git diff --name-only origin/${{ github.base_ref }}...HEAD | Where-Object { $_ -match 'test/.*\.(c|cpp)$' -and $_ -notmatch 'main\.cpp$' }
         $hasTestChanges = $changedTestFiles.Count -gt 0
         
@@ -32,17 +32,24 @@ jobs:
       if: steps.changed_tests.outputs.has_test_changes == 'True'
       uses: jwlawson/actions-setup-cmake@v2
       with:
-        cmake-version: '3.20'
+        cmake-version: '3.25'  # VS 2022 지원을 위한 최신 버전
     
     - name: Setup MSVC
       if: steps.changed_tests.outputs.has_test_changes == 'True'
-      uses: microsoft/setup-msbuild@v2
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        vsversion: 2022  # Visual Studio 2022 명시적 지정
+    
+    - name: Setup Ninja
+      if: steps.changed_tests.outputs.has_test_changes == 'True'
+      uses: seanmiddleditch/gha-setup-ninja@v4
     
     - name: Configure CMake for tests
       if: steps.changed_tests.outputs.has_test_changes == 'True'
       working-directory: test
       run: |
-        cmake -B build -G "Visual Studio 17 2022" -A x64
+        # FetchContent가 GoogleTest를 자동으로 다운로드할 것입니다
+        cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Debug
     
     - name: Build tests
       if: steps.changed_tests.outputs.has_test_changes == 'True'
@@ -63,14 +70,19 @@ jobs:
             Write-Host "Running tests for: $testName"
             
             # 개별 테스트 파일에 대한 테스트 실행 (필터 사용)
-            $result = .\build\Debug\test_runner.exe --gtest_filter="*$testName*" --gtest_output=xml:unit_test_${testName}.xml
+            .\build\test_runner.exe --gtest_filter="*$testName*" --gtest_output=xml:unit_test_${testName}.xml
             $testResults += "unit_test_${testName}.xml"
           }
         }
         
         # 결과 파일들을 하나로 합치기
-        $allResults = Get-ChildItem "unit_test_*.xml" | Get-Content | Out-String
-        $allResults | Out-File -FilePath "unit_test_results.xml"
+        if ($testResults.Count -gt 0) {
+          $allResults = Get-ChildItem "unit_test_*.xml" | Get-Content | Out-String
+          $allResults | Out-File -FilePath "unit_test_results.xml"
+        } else {
+          # 빈 XML 파일 생성
+          '<?xml version="1.0" encoding="UTF-8"?><testsuites></testsuites>' | Out-File -FilePath "unit_test_results.xml"
+        }
     
     - name: Skip unit tests notification
       if: steps.changed_tests.outputs.has_test_changes == 'False'
@@ -83,7 +95,7 @@ jobs:
       with:
         files: test/unit_test_results.xml
         check_name: "Unit Test Results (Individual)"
-        comment_mode: create new
+        comment_mode: always
         report_individual_runs: true
 
   static-test:
@@ -98,7 +110,7 @@ jobs:
     - name: Detect changed source files (excluding Libraries)
       id: changed_sources
       run: |
-        # Libraries 폴더를 제외한 변경된 C/C++ 파일들 찾기 (실제 베이스 브랜치와 비교)
+        # PR에서 변경된 C/C++ 파일들 찾기 (Libraries 폴더 제외)
         CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(c|cpp|h|hpp)$' | grep -v '^Libraries/' || true)
         HAS_CHANGES=$(echo "$CHANGED_FILES" | grep -c . || echo "0")
         
