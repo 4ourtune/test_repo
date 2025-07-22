@@ -61,27 +61,18 @@ jobs:
       if: steps.changed_tests.outputs.has_test_changes == 'True'
       working-directory: test
       run: |
-        $changedFiles = "${{ steps.changed_tests.outputs.changed_test_files }}" -split ','
-        $testResults = @()
-        
-        foreach ($file in $changedFiles) {
-          if ($file -and $file.Trim()) {
-            $testName = [System.IO.Path]::GetFileNameWithoutExtension($file.Trim())
-            Write-Host "Running tests for: $testName"
-            
-            # 개별 테스트 파일에 대한 테스트 실행 (필터 사용)
-            .\build\test_runner.exe --gtest_filter="*$testName*" --gtest_output=xml:unit_test_${testName}.xml
-            $testResults += "unit_test_${testName}.xml"
-          }
-        }
-        
-        # 결과 파일들을 하나로 합치기
-        if ($testResults.Count -gt 0) {
-          $allResults = Get-ChildItem "unit_test_*.xml" | Get-Content | Out-String
-          $allResults | Out-File -FilePath "unit_test_results.xml"
+        # 빌드가 성공했는지 확인
+        if (Test-Path "build\test_runner.exe") {
+          Write-Host "Test runner found, executing tests..."
+          
+          # 모든 테스트 실행
+          .\build\test_runner.exe --gtest_output=xml:test_results.xml
+          
+          Write-Host "Tests completed"
         } else {
+          Write-Host "Test runner not found - build failed"
           # 빈 XML 파일 생성
-          '<?xml version="1.0" encoding="UTF-8"?><testsuites></testsuites>' | Out-File -FilePath "unit_test_results.xml"
+          '<?xml version="1.0" encoding="UTF-8"?><testsuites><testsuite name="BuildFailure" tests="0" failures="1"><testcase name="BuildFailed" classname="BuildError"><failure message="Build failed"/></testcase></testsuite></testsuites>' | Out-File -FilePath "test_results.xml"
         }
     
     - name: Skip unit tests notification
@@ -89,14 +80,41 @@ jobs:
       run: |
         Write-Host "No test files changed. Skipping individual unit tests."
     
-    - name: Publish unit test results
-      uses: EnricoMi/publish-unit-test-result-action/composite@v2
+    - name: Upload test results
       if: always() && steps.changed_tests.outputs.has_test_changes == 'True'
+      uses: actions/upload-artifact@v4
       with:
-        files: test/unit_test_results.xml
-        check_name: "Unit Test Results (Individual)"
-        comment_mode: always
-        report_individual_runs: true
+        name: test-results
+        path: test/test_results.xml
+    
+    - name: Display test summary
+      if: always() && steps.changed_tests.outputs.has_test_changes == 'True'
+      working-directory: test
+      run: |
+        if (Test-Path "test_results.xml") {
+          $xmlContent = Get-Content "test_results.xml" -Raw
+          
+          # XML에서 기본 정보 추출
+          if ($xmlContent -match '<testsuite[^>]*tests="(\d+)"[^>]*failures="(\d+)"[^>]*errors="(\d+)"') {
+            $totalTests = $matches[1]
+            $failures = $matches[2]
+            $errors = $matches[3]
+            $passed = [int]$totalTests - [int]$failures - [int]$errors
+            
+            "### Unit Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "**Total Tests: $totalTests**" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- ✅ Passed: $passed" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- ❌ Failed: $failures" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- ⚠️ Errors: $errors" | Add-Content $env:GITHUB_STEP_SUMMARY
+          } else {
+            "### Unit Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "**Status: Build Failed or No Tests**" | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+        } else {
+          "### Unit Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "**Status: No test results file generated**" | Add-Content $env:GITHUB_STEP_SUMMARY
+        }
 
   static-test:
     runs-on: ubuntu-latest
@@ -142,17 +160,48 @@ jobs:
           echo "============================"
           
           # 변경된 C/C++ 소스 파일들에 대해서만 cppcheck 실행
-          SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(c|cpp)$' || true)
+          SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(c|cpp)
+    
+    - name: Skip static analysis notification
+      if: steps.changed_sources.outputs.has_changes == 'false'
+      run: |
+        echo "No C/C++ files changed (excluding Libraries). Skipping static analysis."
+    
+    - name: Upload static analysis results
+      if: steps.changed_sources.outputs.has_changes == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: cppcheck-report
+        path: cppcheck_results.xml
+    
+    - name: Display cppcheck summary
+      if: steps.changed_sources.outputs.has_changes == 'true'
+      run: |
+        if [ -s cppcheck_results.xml ]; then
+          ISSUE_COUNT=$(grep -c '<error' cppcheck_results.xml || echo "0")
+          if [ "$ISSUE_COUNT" -gt 0 ]; then
+            echo "### Cppcheck Issues Found in Changed Files:" >> $GITHUB_STEP_SUMMARY
+            echo "**Total Issues: $ISSUE_COUNT**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            grep -o 'severity="[^"]*"' cppcheck_results.xml | sort | uniq -c | while read count severity; do
+              echo "- ${severity}: ${count}" >> $GITHUB_STEP_SUMMARY
+            done || echo "- Issues found but categorization failed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### No cppcheck issues found in changed files!" >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "### No cppcheck issues found in changed files!" >> $GITHUB_STEP_SUMMARY
+        fi || true)
           
           if [ -n "$SOURCE_FILES" ]; then
             echo "Analyzing source files:"
             echo "$SOURCE_FILES"
             
-            # 파일별로 cppcheck 실행하여 결과 수집
-            echo '<?xml version="1.0" encoding="UTF-8"?>' > cppcheck_report.xml
-            echo '<results version="2">' >> cppcheck_report.xml
-            echo '<cppcheck version=""/>' >> cppcheck_report.xml
-            echo '<errors>' >> cppcheck_report.xml
+            # cppcheck 실행하고 결과를 XML로 저장
+            echo '<?xml version="1.0" encoding="UTF-8"?>' > cppcheck_results.xml
+            echo '<results version="2">' >> cppcheck_results.xml
+            echo '<cppcheck version=""/>' >> cppcheck_results.xml
+            echo '<errors>' >> cppcheck_results.xml
             
             echo "$SOURCE_FILES" | while IFS= read -r file; do
               if [ -f "$file" ]; then
@@ -168,19 +217,20 @@ jobs:
             
             # 임시 결과를 메인 파일에 병합
             if [ -f temp_cppcheck.xml ]; then
-              grep '<error' temp_cppcheck.xml >> cppcheck_report.xml || true
+              grep '<error' temp_cppcheck.xml >> cppcheck_results.xml || true
               rm temp_cppcheck.xml
             fi
             
-            echo '</errors>' >> cppcheck_report.xml
-            echo '</results>' >> cppcheck_report.xml
+            echo '</errors>' >> cppcheck_results.xml
+            echo '</results>' >> cppcheck_results.xml
+            
           else
             echo "No C/C++ source files to analyze"
-            echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_report.xml
+            echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_results.xml
           fi
         else
           echo "No files to analyze"
-          echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_report.xml
+          echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_results.xml
         fi
     
     - name: Skip static analysis notification
