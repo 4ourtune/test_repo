@@ -32,13 +32,13 @@ jobs:
       if: steps.changed_tests.outputs.has_test_changes == 'True'
       uses: jwlawson/actions-setup-cmake@v2
       with:
-        cmake-version: '3.25'  # VS 2022 지원을 위한 최신 버전
+        cmake-version: 'latest'
     
     - name: Setup MSVC
       if: steps.changed_tests.outputs.has_test_changes == 'True'
       uses: ilammy/msvc-dev-cmd@v1
       with:
-        vsversion: 2022  # Visual Studio 2022 명시적 지정
+        vsversion: 2022
     
     - name: Setup Ninja
       if: steps.changed_tests.outputs.has_test_changes == 'True'
@@ -151,7 +151,6 @@ jobs:
     - name: Run cppcheck on changed files only
       if: steps.changed_sources.outputs.has_changes == 'true'
       run: |
-        # 변경된 파일들만 대상으로 cppcheck 실행 (Libraries 제외)
         CHANGED_FILES="${{ steps.changed_sources.outputs.changed_files }}"
         
         if [ -n "$CHANGED_FILES" ]; then
@@ -159,8 +158,48 @@ jobs:
           echo "$CHANGED_FILES"
           echo "============================"
           
-          # 변경된 C/C++ 소스 파일들에 대해서만 cppcheck 실행
-          SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(c|cpp)
+          SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E "\.(c|cpp)$" || true)
+          
+          if [ -n "$SOURCE_FILES" ]; then
+            echo "Analyzing source files:"
+            echo "$SOURCE_FILES"
+            
+            # XML 헤더 생성
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n' > cppcheck_results.xml
+            printf '<results version="2">\n' >> cppcheck_results.xml
+            printf '<cppcheck version=""/>\n' >> cppcheck_results.xml
+            printf '<errors>\n' >> cppcheck_results.xml
+            
+            # 각 파일에 대해 cppcheck 실행
+            echo "$SOURCE_FILES" | while IFS= read -r file; do
+              if [ -f "$file" ]; then
+                echo "Checking: $file"
+                cppcheck --enable=all --xml --xml-version=2 \
+                  --suppress=missingIncludeSystem \
+                  --suppress=unmatchedSuppression \
+                  --suppress=unusedFunction \
+                  --suppress=unusedStructMember \
+                  "$file" 2>> temp_cppcheck.xml || true
+              fi
+            done
+            
+            # 결과 병합
+            if [ -f temp_cppcheck.xml ]; then
+              grep '<error' temp_cppcheck.xml >> cppcheck_results.xml || true
+              rm temp_cppcheck.xml
+            fi
+            
+            # XML 마무리
+            printf '</errors>\n' >> cppcheck_results.xml
+            printf '</results>\n' >> cppcheck_results.xml
+          else
+            echo "No C/C++ source files to analyze"
+            printf '<?xml version="1.0" encoding="UTF-8"?>\n<results version="2">\n<cppcheck version=""/>\n<errors>\n</errors>\n</results>\n' > cppcheck_results.xml
+          fi
+        else
+          echo "No files to analyze"
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<results version="2">\n<cppcheck version=""/>\n<errors>\n</errors>\n</results>\n' > cppcheck_results.xml
+        fi
     
     - name: Skip static analysis notification
       if: steps.changed_sources.outputs.has_changes == 'false'
@@ -184,77 +223,6 @@ jobs:
             echo "**Total Issues: $ISSUE_COUNT**" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             grep -o 'severity="[^"]*"' cppcheck_results.xml | sort | uniq -c | while read count severity; do
-              echo "- ${severity}: ${count}" >> $GITHUB_STEP_SUMMARY
-            done || echo "- Issues found but categorization failed" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "### No cppcheck issues found in changed files!" >> $GITHUB_STEP_SUMMARY
-          fi
-        else
-          echo "### No cppcheck issues found in changed files!" >> $GITHUB_STEP_SUMMARY
-        fi || true)
-          
-          if [ -n "$SOURCE_FILES" ]; then
-            echo "Analyzing source files:"
-            echo "$SOURCE_FILES"
-            
-            # cppcheck 실행하고 결과를 XML로 저장
-            echo '<?xml version="1.0" encoding="UTF-8"?>' > cppcheck_results.xml
-            echo '<results version="2">' >> cppcheck_results.xml
-            echo '<cppcheck version=""/>' >> cppcheck_results.xml
-            echo '<errors>' >> cppcheck_results.xml
-            
-            echo "$SOURCE_FILES" | while IFS= read -r file; do
-              if [ -f "$file" ]; then
-                echo "Checking: $file"
-                cppcheck --enable=all --xml --xml-version=2 \
-                  --suppress=missingIncludeSystem \
-                  --suppress=unmatchedSuppression \
-                  --suppress=unusedFunction \
-                  --suppress=unusedStructMember \
-                  "$file" 2>> temp_cppcheck.xml || true
-              fi
-            done
-            
-            # 임시 결과를 메인 파일에 병합
-            if [ -f temp_cppcheck.xml ]; then
-              grep '<error' temp_cppcheck.xml >> cppcheck_results.xml || true
-              rm temp_cppcheck.xml
-            fi
-            
-            echo '</errors>' >> cppcheck_results.xml
-            echo '</results>' >> cppcheck_results.xml
-            
-          else
-            echo "No C/C++ source files to analyze"
-            echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_results.xml
-          fi
-        else
-          echo "No files to analyze"
-          echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_results.xml
-        fi
-    
-    - name: Skip static analysis notification
-      if: steps.changed_sources.outputs.has_changes == 'false'
-      run: |
-        echo "No C/C++ files changed (excluding Libraries). Skipping static analysis."
-    
-    - name: Upload cppcheck results
-      if: steps.changed_sources.outputs.has_changes == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: cppcheck-report
-        path: cppcheck_report.xml
-    
-    - name: Display cppcheck summary
-      if: steps.changed_sources.outputs.has_changes == 'true'
-      run: |
-        if [ -s cppcheck_report.xml ]; then
-          ISSUE_COUNT=$(grep -c '<error' cppcheck_report.xml || echo "0")
-          if [ "$ISSUE_COUNT" -gt 0 ]; then
-            echo "### Cppcheck Issues Found in Changed Files:" >> $GITHUB_STEP_SUMMARY
-            echo "**Total Issues: $ISSUE_COUNT**" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            grep -o 'severity="[^"]*"' cppcheck_report.xml | sort | uniq -c | while read count severity; do
               echo "- ${severity}: ${count}" >> $GITHUB_STEP_SUMMARY
             done || echo "- Issues found but categorization failed" >> $GITHUB_STEP_SUMMARY
           else
