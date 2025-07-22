@@ -86,9 +86,9 @@ jobs:
             "### Integration Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
             "**Total Tests: $totalTests**" | Add-Content $env:GITHUB_STEP_SUMMARY
             "" | Add-Content $env:GITHUB_STEP_SUMMARY
-            "- Passed: $passed" | Add-Content $env:GITHUB_STEP_SUMMARY
-            "- Failed: $failures" | Add-Content $env:GITHUB_STEP_SUMMARY
-            "- Errors: $errors" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- ✅ Passed: $passed" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- ❌ Failed: $failures" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- ⚠️ Errors: $errors" | Add-Content $env:GITHUB_STEP_SUMMARY
           } else {
             "### Integration Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
             "**Status: Build Failed or No Tests**" | Add-Content $env:GITHUB_STEP_SUMMARY
