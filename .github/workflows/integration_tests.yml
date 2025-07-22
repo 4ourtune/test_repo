@@ -1,21 +1,14 @@
 name: Integration Test
 
 on:
+  # release 브랜치로의 모든 PR (develop → release 포함)
   pull_request:
     branches: [ release, release/* ]
     types: [opened, synchronize, reopened]
+  
+  # release 브랜치에 직접 push (병합 완료 후)
   push:
     branches: [ release, release/* ]
-  workflow_dispatch:  # 수동 실행 가능
-    inputs:
-      environment:
-        description: 'Test environment'
-        required: true
-        default: 'staging'
-        type: choice
-        options:
-        - staging
-        - pre-production
 
 jobs:
   dynamic-test:
@@ -28,67 +21,82 @@ jobs:
         submodules: recursive
         fetch-depth: 0
     
-    - name: Detect source changes
-      id: changed_sources
-      run: |
-        # 모든 소스 파일 변경 확인 (Libraries 제외, 실제 베이스 브랜치와 비교)
-        if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-          # 수동 실행시에는 모든 테스트 실행
-          $hasSourceChanges = $true
-          Write-Host "Manual trigger - running all integration tests"
-        } else {
-          $changedSources = git diff --name-only origin/${{ github.base_ref }}...HEAD | Where-Object { 
-            $_ -match '\.(c|cpp|h|hpp)$' -and $_ -notmatch '^Libraries/' 
-          }
-          $hasSourceChanges = $changedSources.Count -gt 0
-          Write-Host "Changed sources (excluding Libraries): $($changedSources -join ', ')"
-        }
-        
-        Write-Output "has_source_changes=$hasSourceChanges" >> $env:GITHUB_OUTPUT
-        Write-Host "Has source changes (excluding Libraries): $hasSourceChanges"
-    
     - name: Setup CMake
-      if: steps.changed_sources.outputs.has_source_changes == 'True'
       uses: jwlawson/actions-setup-cmake@v2
       with:
-        cmake-version: '3.20'
+        cmake-version: 'latest'
     
     - name: Setup MSVC
-      if: steps.changed_sources.outputs.has_source_changes == 'True'
-      uses: microsoft/setup-msbuild@v2
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        vsversion: 2022
+    
+    - name: Setup Ninja
+      uses: seanmiddleditch/gha-setup-ninja@v4
     
     - name: Configure CMake for integration tests
-      if: steps.changed_sources.outputs.has_source_changes == 'True'
       working-directory: test
       run: |
-        cmake -B build -G "Visual Studio 17 2022" -A x64
+        # FetchContent가 GoogleTest를 자동으로 다운로드할 것입니다
+        cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
     
     - name: Build integration tests
-      if: steps.changed_sources.outputs.has_source_changes == 'True'
       working-directory: test
       run: |
-        cmake --build build --config Release  # Release 모드로 빌드
+        cmake --build build --config Release
     
     - name: Run full integration test suite
-      if: steps.changed_sources.outputs.has_source_changes == 'True'
       working-directory: test
       run: |
-        Write-Host "Running full integration test suite..."
-        .\build\Release\test_runner.exe --gtest_output=xml:integration_test_results.xml
+        # 빌드가 성공했는지 확인
+        if (Test-Path "build\test_runner.exe") {
+          Write-Host "Test runner found, executing all integration tests..."
+          
+          # 모든 테스트 실행 (test 폴더의 모든 테스트)
+          .\build\test_runner.exe --gtest_output=xml:integration_test_results.xml
+          
+          Write-Host "Integration tests completed"
+        } else {
+          Write-Host "Test runner not found - build failed"
+          # 빈 XML 파일 생성
+          '<?xml version="1.0" encoding="UTF-8"?><testsuites><testsuite name="BuildFailure" tests="0" failures="1"><testcase name="BuildFailed" classname="BuildError"><failure message="Build failed"/></testcase></testsuite></testsuites>' | Out-File -FilePath "integration_test_results.xml"
+        }
     
-    - name: Skip integration tests notification
-      if: steps.changed_sources.outputs.has_source_changes == 'False'
-      run: |
-        Write-Host "No source files changed (excluding Libraries). Skipping integration tests."
-    
-    - name: Publish integration test results
-      uses: EnricoMi/publish-unit-test-result-action/composite@v2
-      if: always() && steps.changed_sources.outputs.has_source_changes == 'True'
+    - name: Upload integration test results
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
-        files: test/integration_test_results.xml
-        check_name: "Integration Test Results (Full Suite)"
-        comment_mode: create new
-        report_individual_runs: true
+        name: integration-test-results
+        path: test/integration_test_results.xml
+    
+    - name: Display integration test summary
+      if: always()
+      working-directory: test
+      run: |
+        if (Test-Path "integration_test_results.xml") {
+          $xmlContent = Get-Content "integration_test_results.xml" -Raw
+          
+          # XML에서 기본 정보 추출
+          if ($xmlContent -match '<testsuite[^>]*tests="(\d+)"[^>]*failures="(\d+)"[^>]*errors="(\d+)"') {
+            $totalTests = $matches[1]
+            $failures = $matches[2]
+            $errors = $matches[3]
+            $passed = [int]$totalTests - [int]$failures - [int]$errors
+            
+            "### Integration Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "**Total Tests: $totalTests**" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- Passed: $passed" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- Failed: $failures" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "- Errors: $errors" | Add-Content $env:GITHUB_STEP_SUMMARY
+          } else {
+            "### Integration Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "**Status: Build Failed or No Tests**" | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+        } else {
+          "### Integration Test Results:" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "**Status: No test results file generated**" | Add-Content $env:GITHUB_STEP_SUMMARY
+        }
 
   static-test:
     runs-on: ubuntu-latest
@@ -99,111 +107,132 @@ jobs:
       with:
         fetch-depth: 0
     
-    - name: Detect changed source files (excluding Libraries)
-      id: changed_sources
+    - name: Check for src and include directories
+      id: check_dirs
       run: |
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          # 수동 실행시에는 전체 소스 분석
-          echo "Manual trigger - analyzing all source files"
-          CHANGED_FILES=$(find . -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" | grep -v '^./Libraries/' || true)
-          HAS_CHANGES="true"
-        else
-          # PR/Push 시에는 변경된 파일만 분석
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(c|cpp|h|hpp)$' | grep -v '^Libraries/' || true)
-          HAS_CHANGES=$(echo "$CHANGED_FILES" | grep -c . || echo "0")
-          HAS_CHANGES=$([[ $HAS_CHANGES -gt 0 ]] && echo 'true' || echo 'false')
+        HAS_SOURCE_FILES="false"
+        
+        # src 폴더에서 C/C++ 소스 파일 찾기
+        if [ -d "src" ]; then
+          SRC_FILES=$(find src -name "*.c" -o -name "*.cpp" 2>/dev/null || true)
+          if [ -n "$SRC_FILES" ]; then
+            HAS_SOURCE_FILES="true"
+            echo "Found source files in src directory"
+          fi
         fi
         
-        echo "changed_files<<EOF" >> $GITHUB_OUTPUT
-        echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-        echo "has_changes=$HAS_CHANGES" >> $GITHUB_OUTPUT
+        # include 폴더에서 헤더 파일 찾기 (정적 분석 대상)
+        if [ -d "include" ]; then
+          HEADER_FILES=$(find include -name "*.h" -o -name "*.hpp" 2>/dev/null || true)
+          if [ -n "$HEADER_FILES" ]; then
+            HAS_SOURCE_FILES="true"
+            echo "Found header files in include directory"
+          fi
+        fi
         
-        echo "Changed C/C++ files (excluding Libraries):"
-        echo "$CHANGED_FILES"
-        echo "Has changes: $HAS_CHANGES"
+        echo "has_source_files=$HAS_SOURCE_FILES" >> $GITHUB_OUTPUT
+        
+        if [ "$HAS_SOURCE_FILES" = "false" ]; then
+          echo "No C/C++ files found in src or include directories"
+        fi
     
     - name: Install cppcheck
-      if: steps.changed_sources.outputs.has_changes == 'true'
+      if: steps.check_dirs.outputs.has_source_files == 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y cppcheck
     
-    - name: Run comprehensive cppcheck analysis
-      if: steps.changed_sources.outputs.has_changes == 'true'
+    - name: Run comprehensive cppcheck analysis on src and include
+      if: steps.check_dirs.outputs.has_source_files == 'true'
       run: |
-        CHANGED_FILES="${{ steps.changed_sources.outputs.changed_files }}"
+        echo "=== Running comprehensive static analysis ==="
         
-        if [ -n "$CHANGED_FILES" ]; then
-          echo "=== Files to be analyzed ==="
-          echo "$CHANGED_FILES"
+        # src와 include 폴더에서 모든 C/C++ 파일 찾기
+        ALL_FILES=""
+        if [ "${{ steps.check_dirs.outputs.has_src }}" = "true" ]; then
+          SRC_FILES=$(find src -name "*.c" -o -name "*.cpp" 2>/dev/null || true)
+          if [ -n "$SRC_FILES" ]; then
+            ALL_FILES="$ALL_FILES$SRC_FILES"
+            echo "Source files in src/:"
+            echo "$SRC_FILES"
+          fi
+        fi
+        
+        if [ "${{ steps.check_dirs.outputs.has_include }}" = "true" ]; then
+          INCLUDE_FILES=$(find include -name "*.c" -o -name "*.cpp" 2>/dev/null || true)
+          if [ -n "$INCLUDE_FILES" ]; then
+            if [ -n "$ALL_FILES" ]; then
+              ALL_FILES="$ALL_FILES$INCLUDE_FILES"
+            else
+              ALL_FILES="$INCLUDE_FILES"
+            fi
+            echo "Source files in include/:"
+            echo "$INCLUDE_FILES"
+          fi
+        fi
+        
+        if [ -n "$ALL_FILES" ]; then
+          echo "=== All files to analyze ==="
+          echo "$ALL_FILES"
           echo "============================"
           
-          # 변경된 C/C++ 소스 파일들에 대해서만 cppcheck 실행
-          SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(c|cpp)$' || true)
+          # XML 헤더 생성
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n' > cppcheck_results.xml
+          printf '<results version="2">\n' >> cppcheck_results.xml
+          printf '<cppcheck version=""/>\n' >> cppcheck_results.xml
+          printf '<errors>\n' >> cppcheck_results.xml
           
-          if [ -n "$SOURCE_FILES" ]; then
-            echo "Analyzing source files with comprehensive checks:"
-            echo "$SOURCE_FILES"
-            
-            # 파일별로 cppcheck 실행하여 결과 수집 (더 엄격한 검사)
-            echo '<?xml version="1.0" encoding="UTF-8"?>' > cppcheck_report.xml
-            echo '<results version="2">' >> cppcheck_report.xml
-            echo '<cppcheck version=""/>' >> cppcheck_report.xml
-            echo '<errors>' >> cppcheck_report.xml
-            
-            echo "$SOURCE_FILES" | while IFS= read -r file; do
-              if [ -f "$file" ]; then
-                echo "Comprehensive checking: $file"
-                cppcheck --enable=all --xml --xml-version=2 \
-                  --suppress=missingIncludeSystem \
-                  --suppress=unmatchedSuppression \
-                  --check-config \
-                  --inconclusive \
-                  "$file" 2>> temp_cppcheck.xml || true
-              fi
-            done
-            
-            # 임시 결과를 메인 파일에 병합
-            if [ -f temp_cppcheck.xml ]; then
-              grep '<error' temp_cppcheck.xml >> cppcheck_report.xml || true
-              rm temp_cppcheck.xml
+          # 각 파일에 대해 cppcheck 실행
+          echo "$ALL_FILES" | while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              echo "Comprehensive checking: $file"
+              cppcheck --enable=all --xml --xml-version=2 \
+                --suppress=missingIncludeSystem \
+                --suppress=unmatchedSuppression \
+                --suppress=unusedFunction \
+                --suppress=unusedStructMember \
+                --inconclusive \
+                "$file" 2>> temp_cppcheck.xml || true
             fi
-            
-            echo '</errors>' >> cppcheck_report.xml
-            echo '</results>' >> cppcheck_report.xml
-          else
-            echo "No C/C++ source files to analyze"
-            echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_report.xml
+          done
+          
+          # 결과 병합
+          if [ -f temp_cppcheck.xml ]; then
+            grep '<error' temp_cppcheck.xml >> cppcheck_results.xml || true
+            rm temp_cppcheck.xml
           fi
+          
+          # XML 마무리
+          printf '</errors>\n' >> cppcheck_results.xml
+          printf '</results>\n' >> cppcheck_results.xml
         else
-          echo "No files to analyze"
-          echo '<?xml version="1.0" encoding="UTF-8"?><results version="2"><cppcheck version=""/><errors></errors></results>' > cppcheck_report.xml
+          echo "No C/C++ files found"
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<results version="2">\n<cppcheck version=""/>\n<errors>\n</errors>\n</results>\n' > cppcheck_results.xml
         fi
     
     - name: Skip static analysis notification
-      if: steps.changed_sources.outputs.has_changes == 'false'
+      if: steps.check_dirs.outputs.has_source_files == 'false'
       run: |
-        echo "No C/C++ files changed (excluding Libraries). Skipping static analysis."
+        echo "No C/C++ files found in src or include directories. Skipping static analysis."
     
     - name: Upload comprehensive cppcheck results
-      if: steps.changed_sources.outputs.has_changes == 'true'
+      if: steps.check_dirs.outputs.has_source_files == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: integration-cppcheck-report
-        path: cppcheck_report.xml
+        path: cppcheck_results.xml
     
     - name: Display comprehensive cppcheck summary
-      if: steps.changed_sources.outputs.has_changes == 'true'
+      if: steps.check_dirs.outputs.has_source_files == 'true'
       run: |
-        if [ -s cppcheck_report.xml ]; then
-          ISSUE_COUNT=$(grep -c '<error' cppcheck_report.xml || echo "0")
+        if [ -s cppcheck_results.xml ]; then
+          ISSUE_COUNT=$(grep -c '<error' cppcheck_results.xml || echo "0")
           if [ "$ISSUE_COUNT" -gt 0 ]; then
             echo "### Comprehensive Cppcheck Issues Found:" >> $GITHUB_STEP_SUMMARY
             echo "**Total Issues: $ISSUE_COUNT**" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "**Severity Breakdown:**" >> $GITHUB_STEP_SUMMARY
-            grep -o 'severity="[^"]*"' cppcheck_report.xml | sort | uniq -c | while read count severity; do
+            grep -o 'severity="[^"]*"' cppcheck_results.xml | sort | uniq -c | while read count severity; do
               echo "- ${severity}: ${count}" >> $GITHUB_STEP_SUMMARY
             done || echo "- Issues found but categorization failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
